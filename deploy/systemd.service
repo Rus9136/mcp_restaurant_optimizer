@@ -1,0 +1,27 @@
+# Systemd сервис для MCP Restaurant Optimizer
+# Сохранить в /etc/systemd/system/mcp-restaurant.service
+
+[Unit]
+Description=MCP Restaurant Optimizer API
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/projects/mcp_restaurant_optimizer
+Environment="PATH=/root/projects/mcp_restaurant_optimizer/venv/bin"
+ExecStart=/root/projects/mcp_restaurant_optimizer/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8003
+Restart=on-failure
+RestartSec=5
+
+# Логирование
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mcp-restaurant
+
+# Ограничения ресурсов (опционально)
+MemoryLimit=512M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target
