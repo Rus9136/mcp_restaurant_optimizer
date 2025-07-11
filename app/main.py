@@ -8,6 +8,7 @@ import sys
 from app.core.config import get_settings
 from app.core.exceptions import MCPError
 from app.api.v1.endpoints import router as v1_router
+from app.api.v1.sse_endpoints import router as sse_router
 
 # Настройка логирования
 logger.remove()
@@ -45,6 +46,7 @@ app.add_middleware(
 
 # Подключение роутеров
 app.include_router(v1_router)
+app.include_router(sse_router)
 
 # Глобальный обработчик ошибок
 @app.exception_handler(MCPError)

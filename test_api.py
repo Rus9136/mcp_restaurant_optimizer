@@ -8,7 +8,7 @@ import httpx
 from datetime import date, timedelta
 from pprint import pprint
 
-BASE_URL = "http://localhost:8003"
+BASE_URL = "https://mcp.madlen.space"
 
 # Тестовые данные
 TEST_DEPARTMENT_ID = "4cb558ca-a8bc-4b81-871e-043f65218c50"
