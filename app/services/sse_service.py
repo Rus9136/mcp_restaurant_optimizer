@@ -32,13 +32,36 @@ class SSEService:
     def __init__(self):
         self.settings = get_settings()
         self.active_connections: Dict[str, bool] = {}
-        self._demo_mode = True  # Для тестирования. В продакшене False
+        self._demo_mode = False  # Продакшен режим по умолчанию
         self._db_provider = None
         
         # Инициализация провайдера базы данных
-        # Попытаемся подключиться к реальным API вместо демо данных
-        self._demo_mode = False  # Переключаем на реальные данные
-        logger.info("SSE Service initialized in production mode - using real APIs")
+        self._initialize_database_provider()
+        
+        if self._db_provider:
+            logger.info("SSE Service initialized in production mode with database integration")
+        else:
+            logger.warning("SSE Service initialized in fallback mode - using external APIs and demo data")
+    
+    def _initialize_database_provider(self):
+        """Инициализация провайдера базы данных"""
+        try:
+            if DATABASE_INTEGRATION_AVAILABLE and hasattr(self.settings, 'database_url') and self.settings.database_url:
+                database_type = getattr(self.settings, 'database_type', 'postgresql')
+                cache_ttl = getattr(self.settings, 'sse_cache_ttl', 30)
+                
+                self._db_provider = CachedDatabaseSSEProvider(
+                    db_url=self.settings.database_url,
+                    db_type=database_type,
+                    cache_ttl=cache_ttl
+                )
+                logger.info(f"Database provider initialized: {database_type}")
+            else:
+                logger.warning("Database integration not available or not configured")
+                
+        except Exception as e:
+            logger.error(f"Failed to initialize database provider: {e}")
+            self._db_provider = None
         
     async def generate_sse_stream(
         self, 
@@ -116,6 +139,22 @@ class SSEService:
         """
         return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
     
+    def _create_error_event(self, event_type: str, source: str, error_message: str, department_id: str) -> Dict:
+        """
+        Создает событие об ошибке в правильном SSE формате
+        """
+        return {
+            "type": "error",
+            "timestamp": datetime.now().isoformat(),
+            "department_id": department_id,
+            "data": {
+                "event_type": event_type,
+                "source": source,
+                "error": error_message,
+                "fallback_available": True
+            }
+        }
+    
     async def _get_sales_event(self, department_id: Optional[str] = None) -> Dict:
         """
         Получает данные о продажах
@@ -123,29 +162,34 @@ class SSEService:
         if self._demo_mode:
             return self._generate_demo_sales_data(department_id)
         
+        dept_id = department_id or "4cb558ca-a8bc-4b81-871e-043f65218c50"
+        
+        # Сначала пытаемся получить данные из базы данных
+        if self._db_provider:
+            try:
+                return await self._db_provider.get_real_sales_data(dept_id)
+            except Exception as db_error:
+                logger.warning(f"Database error for sales data: {db_error}")
+                return self._create_error_event("sales", "database", str(db_error), dept_id)
+        
+        # Fallback на внешние API
         try:
-            # Сначала пытаемся получить данные из базы данных
-            if self._db_provider:
-                try:
-                    return await self._db_provider.get_real_sales_data(
-                        department_id or "4cb558ca-a8bc-4b81-871e-043f65218c50"
-                    )
-                except Exception as db_error:
-                    logger.warning(f"Database error, falling back to API: {db_error}")
-            
-            # Fallback на API если БД недоступна
             async with HTTPClient() as client:
-                # Получаем данные за последний час
                 now = datetime.now()
                 hour_ago = now - timedelta(hours=1)
                 
                 params = {
                     "from_date": hour_ago.date().isoformat(),
                     "to_date": now.date().isoformat(),
-                    "department_id": department_id or "4cb558ca-a8bc-4b81-871e-043f65218c50"
+                    "department_id": dept_id
                 }
                 
                 sales_data = await client.get_aqniet("sales/hourly", params=params)
+                
+                # Проверяем, что данные получены
+                if not sales_data:
+                    logger.warning("Empty sales data from Aqniet API")
+                    return self._create_error_event("sales", "api", "No data received from Aqniet API", dept_id)
                 
                 # Агрегируем данные
                 total_sales = sum(item.get("sales_amount", 0) for item in sales_data)
@@ -154,18 +198,20 @@ class SSEService:
                 return {
                     "type": "sales",
                     "timestamp": datetime.now().isoformat(),
-                    "department_id": department_id,
+                    "department_id": dept_id,
                     "data": {
                         "total_sales": total_sales,
                         "total_transactions": total_transactions,
                         "average_check": total_sales / total_transactions if total_transactions > 0 else 0,
                         "period": "last_hour",
-                        "currency": "RUB"
+                        "currency": "RUB",
+                        "source": "aqniet_api"
                     }
                 }
-        except Exception as e:
-            logger.error(f"Ошибка получения данных о продажах: {e}")
-            return self._generate_demo_sales_data(department_id)
+                
+        except Exception as api_error:
+            logger.error(f"Ошибка получения данных о продажах из API: {api_error}")
+            return self._create_error_event("sales", "api", str(api_error), dept_id)
     
     async def _get_bookings_event(self, department_id: Optional[str] = None) -> Dict:
         """
@@ -174,24 +220,39 @@ class SSEService:
         if self._demo_mode:
             return self._generate_demo_bookings_data(department_id)
         
+        dept_id = department_id or "4cb558ca-a8bc-4b81-871e-043f65218c50"
+        
+        # Пытаемся получить данные из базы данных
+        if self._db_provider:
+            try:
+                return await self._db_provider.get_real_bookings_data(dept_id)
+            except Exception as db_error:
+                logger.warning(f"Database error for bookings data: {db_error}")
+                return self._create_error_event("bookings", "database", str(db_error), dept_id)
+        
+        # Fallback на внешние API
         try:
-            # Здесь будет реальный запрос к системе бронирований
-            # Пример интеграции с внешним API бронирований
             async with HTTPClient() as client:
-                # Замените на реальный endpoint бронирований
                 bookings_data = await client.get_madlen("bookings/today", {
-                    "department_id": department_id or "4cb558ca-a8bc-4b81-871e-043f65218c50"
+                    "department_id": dept_id
                 })
+                
+                if not bookings_data:
+                    logger.warning("Empty bookings data from Madlen API")
+                    return self._create_error_event("bookings", "api", "No data received from Madlen API", dept_id)
                 
                 return {
                     "type": "bookings",
                     "timestamp": datetime.now().isoformat(),
-                    "department_id": department_id,
-                    "data": bookings_data
+                    "department_id": dept_id,
+                    "data": {
+                        **bookings_data,
+                        "source": "madlen_api"
+                    }
                 }
-        except Exception as e:
-            logger.error(f"Ошибка получения данных о бронированиях: {e}")
-            return self._generate_demo_bookings_data(department_id)
+        except Exception as api_error:
+            logger.error(f"Ошибка получения данных о бронированиях: {api_error}")
+            return self._create_error_event("bookings", "api", str(api_error), dept_id)
     
     async def _get_occupancy_event(self, department_id: Optional[str] = None) -> Dict:
         """
@@ -200,23 +261,39 @@ class SSEService:
         if self._demo_mode:
             return self._generate_demo_occupancy_data(department_id)
         
+        dept_id = department_id or "4cb558ca-a8bc-4b81-871e-043f65218c50"
+        
+        # Пытаемся получить данные из базы данных
+        if self._db_provider:
+            try:
+                return await self._db_provider.get_real_occupancy_data(dept_id)
+            except Exception as db_error:
+                logger.warning(f"Database error for occupancy data: {db_error}")
+                return self._create_error_event("occupancy", "database", str(db_error), dept_id)
+        
+        # Fallback на внешние API (IoT датчики, POS система, камеры)
         try:
-            # Реальный запрос к системе мониторинга загрузки
-            # Можно интегрировать с IoT датчиками, POS системой или камерами
             async with HTTPClient() as client:
                 occupancy_data = await client.get_madlen("occupancy/current", {
-                    "department_id": department_id or "4cb558ca-a8bc-4b81-871e-043f65218c50"
+                    "department_id": dept_id
                 })
+                
+                if not occupancy_data:
+                    logger.warning("Empty occupancy data from Madlen API")
+                    return self._create_error_event("occupancy", "api", "No data received from Madlen API", dept_id)
                 
                 return {
                     "type": "occupancy",
                     "timestamp": datetime.now().isoformat(),
-                    "department_id": department_id,
-                    "data": occupancy_data
+                    "department_id": dept_id,
+                    "data": {
+                        **occupancy_data,
+                        "source": "madlen_api"
+                    }
                 }
-        except Exception as e:
-            logger.error(f"Ошибка получения данных о загрузке: {e}")
-            return self._generate_demo_occupancy_data(department_id)
+        except Exception as api_error:
+            logger.error(f"Ошибка получения данных о загрузке: {api_error}")
+            return self._create_error_event("occupancy", "api", str(api_error), dept_id)
     
     async def _get_shifts_event(self, department_id: Optional[str] = None) -> Dict:
         """
@@ -225,22 +302,41 @@ class SSEService:
         if self._demo_mode:
             return self._generate_demo_shifts_data(department_id)
         
+        dept_id = department_id or "4cb558ca-a8bc-4b81-871e-043f65218c50"
+        
+        # Пытаемся получить данные из базы данных (HR система)
+        if self._db_provider:
+            try:
+                # Здесь можно добавить метод get_real_shifts_data в DatabaseSSEProvider
+                # Пока используем внешний API
+                pass
+            except Exception as db_error:
+                logger.warning(f"Database error for shifts data: {db_error}")
+                return self._create_error_event("shifts", "database", str(db_error), dept_id)
+        
+        # Запрос к HR системе через API
         try:
-            # Реальный запрос к HR системе
             async with HTTPClient() as client:
                 shifts_data = await client.get_madlen("shifts/current", {
-                    "department_id": department_id or "4cb558ca-a8bc-4b81-871e-043f65218c50"
+                    "department_id": dept_id
                 })
+                
+                if not shifts_data:
+                    logger.warning("Empty shifts data from Madlen API")
+                    return self._create_error_event("shifts", "api", "No data received from Madlen API", dept_id)
                 
                 return {
                     "type": "shifts",
                     "timestamp": datetime.now().isoformat(),
-                    "department_id": department_id,
-                    "data": shifts_data
+                    "department_id": dept_id,
+                    "data": {
+                        **shifts_data,
+                        "source": "madlen_api"
+                    }
                 }
-        except Exception as e:
-            logger.error(f"Ошибка получения данных о сменах: {e}")
-            return self._generate_demo_shifts_data(department_id)
+        except Exception as api_error:
+            logger.error(f"Ошибка получения данных о сменах: {api_error}")
+            return self._create_error_event("shifts", "api", str(api_error), dept_id)
     
     def _generate_demo_sales_data(self, department_id: Optional[str] = None) -> Dict:
         """
