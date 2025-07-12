@@ -87,3 +87,55 @@ class HTTPClient:
                 endpoint=url,
                 details={"error": str(e)}
             )
+    
+    async def get_reviews(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> list[Dict[str, Any]]:
+        url = f"https://reviews.aqniet.site/api/{endpoint.lstrip('/')}"
+        
+        try:
+            logger.debug(f"GET {url} with params: {params}")
+            response = await self._client.get(url, params=params)
+            response.raise_for_status()
+            return response.json()
+        except httpx.TimeoutException:
+            logger.error(f"Timeout при обращении к {url}")
+            raise ExternalAPIError(
+                message=f"Таймаут при обращении к reviews.aqniet.site",
+                endpoint=url,
+                timeout=True
+            )
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP ошибка {e.response.status_code} при обращении к {url}")
+            
+            # Специальная обработка для API отзывов
+            if e.response.status_code == 404:
+                raise ExternalAPIError(
+                    message="ID подразделения не найден или филиал не найден в БД отзывов",
+                    endpoint=url,
+                    status_code=404
+                )
+            elif e.response.status_code == 500:
+                raise ExternalAPIError(
+                    message="У филиала нет 2GIS ID",
+                    endpoint=url,
+                    status_code=500
+                )
+            elif e.response.status_code == 400:
+                raise ExternalAPIError(
+                    message="Параметр count вне диапазона 1-1000",
+                    endpoint=url,
+                    status_code=400
+                )
+            else:
+                raise ExternalAPIError(
+                    message=f"Ошибка при обращении к reviews.aqniet.site",
+                    endpoint=url,
+                    status_code=e.response.status_code,
+                    details={"response_text": e.response.text[:200]}
+                )
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка при обращении к {url}: {str(e)}")
+            raise ExternalAPIError(
+                message=f"Неожиданная ошибка при обращении к reviews.aqniet.site",
+                endpoint=url,
+                details={"error": str(e)}
+            )

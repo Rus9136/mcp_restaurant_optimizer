@@ -58,3 +58,15 @@ class PayrollRequest(BaseModel):
 
 class DepartmentInfoRequest(BaseModel):
     department_id: UUID = Field(..., description="UUID подразделения")
+
+
+class ReviewsRequest(BaseModel):
+    department_id: UUID = Field(..., description="UUID подразделения (id_iiko)")
+    count: int = Field(..., description="Количество отзывов", ge=1, le=1000)
+    
+    @field_validator('count')
+    @classmethod
+    def validate_count(cls, v: int) -> int:
+        if not 1 <= v <= 1000:
+            raise ValueError('count должен быть в диапазоне от 1 до 1000')
+        return v

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from datetime import date
+from datetime import date, datetime
 from typing import List, Optional, Dict, Any
 
 
@@ -68,3 +68,23 @@ class ErrorDetail(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: ErrorDetail
+
+
+class Review(BaseModel):
+    review_id: str
+    branch_id: str
+    branch_name: str
+    user_name: str
+    rating: float
+    text: str
+    date_created: datetime
+    date_edited: Optional[datetime] = None
+    is_verified: bool
+    likes_count: int
+    comments_count: int
+    photos_count: int
+    photos_urls: List[str]
+
+
+class ReviewsResponse(BaseModel):
+    data: List[Review]

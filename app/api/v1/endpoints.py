@@ -12,7 +12,8 @@ from app.models.requests import (
     HourlySalesRequest,
     PlanVsFactRequest,
     PayrollRequest,
-    DepartmentInfoRequest
+    DepartmentInfoRequest,
+    ReviewsRequest
 )
 from app.models.responses import (
     ForecastResponse,
@@ -22,7 +23,9 @@ from app.models.responses import (
     DepartmentInfo,
     ForecastItem,
     HourlySalesItem,
-    PlanVsFactItem
+    PlanVsFactItem,
+    ReviewsResponse,
+    Review
 )
 from app.services.http_client import HTTPClient
 from app.utils.cache import cache_manager
@@ -195,122 +198,157 @@ async def get_department_info(request: DepartmentInfoRequest):
         )
 
 
-async def generate_sse_stream() -> AsyncGenerator[str, None]:
+@router.get("/reviews/{department_id}/{count}", response_model=ReviewsResponse)
+@cache_manager.cached(ttl=settings.cache_ttl)
+async def get_reviews(department_id: str, count: int):
     """
-    Генератор потока SSE с бизнес-данными
+    Получить отзывы по подразделению
     """
-    # Пример department_id для демонстрации
-    demo_department_id = "4cb558ca-a8bc-4b81-871e-043f65218c50"
+    # Валидация count
+    if not 1 <= count <= 1000:
+        raise ExternalAPIError(
+            message="count должен быть в диапазоне от 1 до 1000",
+            endpoint=f"v1/by-iiko/{department_id}/{count}",
+            status_code=400
+        )
     
-    counter = 0
-    while True:
-        try:
-            counter += 1
-            timestamp = datetime.now().isoformat()
+    logger.info(f"Запрос отзывов для department_id={department_id}, "
+                f"количество: {count}")
+    
+    try:
+        async with HTTPClient() as client:
+            endpoint = f"v1/by-iiko/{department_id}/{count}"
+            data = await client.get_reviews(endpoint)
             
-            # Генерируем разные типы событий
-            if counter % 4 == 1:
-                # Событие прогноза продаж
-                event_data = {
-                    "event_type": "forecast_update",
-                    "timestamp": timestamp,
-                    "department_id": demo_department_id,
-                    "data": {
-                        "date": datetime.now().strftime("%Y-%m-%d"),
-                        "predicted_sales": 150000.0 + (counter * 1000),
-                        "confidence": 0.85
-                    }
-                }
-            elif counter % 4 == 2:
-                # Событие почасовых продаж
-                event_data = {
-                    "event_type": "hourly_sales_update",
-                    "timestamp": timestamp,
-                    "department_id": demo_department_id,
-                    "data": {
-                        "date": datetime.now().strftime("%Y-%m-%d"),
-                        "hour": datetime.now().hour,
-                        "sales_amount": 5000.0 + (counter * 100),
-                        "transactions_count": 45 + counter
-                    }
-                }
-            elif counter % 4 == 3:
-                # Событие сравнения план/факт
-                event_data = {
-                    "event_type": "plan_vs_fact_update",
-                    "timestamp": timestamp,
-                    "department_id": demo_department_id,
-                    "data": {
-                        "date": datetime.now().strftime("%Y-%m-%d"),
-                        "predicted_sales": 150000.0,
-                        "actual_sales": 145000.0 + (counter * 500),
-                        "error_percentage": round((counter * 0.1) - 3.33, 2)
-                    }
-                }
-            else:
-                # Событие состояния системы
-                event_data = {
-                    "event_type": "system_status",
-                    "timestamp": timestamp,
-                    "data": {
-                        "active_departments": 5,
-                        "total_daily_sales": 750000.0 + (counter * 10000),
-                        "api_response_time_ms": 120 + (counter % 50),
-                        "cache_hit_rate": 0.75 + (counter % 20) * 0.01
-                    }
-                }
+            # Преобразуем ответ в наш формат
+            reviews = [Review(**item) for item in data]
             
-            # Форматируем как SSE
-            sse_data = f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-            
-            logger.info(f"Отправляем SSE событие: {event_data['event_type']}")
-            yield sse_data
-            
-            # Ждём 3 секунды между событиями
-            await asyncio.sleep(3)
-            
-        except Exception as e:
-            logger.error(f"Ошибка генерации SSE события: {e}")
-            # Отправляем событие об ошибке
-            error_event = {
-                "event_type": "error",
-                "timestamp": datetime.now().isoformat(),
-                "data": {
-                    "message": str(e),
-                    "error_type": "stream_generation_error"
-                }
-            }
-            yield f"data: {json.dumps(error_event, ensure_ascii=False)}\n\n"
-            await asyncio.sleep(5)
+            return ReviewsResponse(data=reviews)
+    except Exception as e:
+        raise ExternalAPIError(
+            message=str(e),
+            endpoint=f"v1/by-iiko/{department_id}/{count}"
+        )
 
 
-@router.get("/sse")
-async def stream_sse():
-    """
-    Server-Sent Events endpoint для потокового получения бизнес-данных
-    
-    Этот endpoint предоставляет реальное время обновления данных:
-    - Прогнозы продаж
-    - Почасовые продажи
-    - Сравнение план/факт
-    - Статус системы
-    
-    Формат: text/event-stream
-    Не требует авторизации для совместимости с Deep Research
-    """
-    logger.info("Запущен SSE поток для клиента")
-    
-    return StreamingResponse(
-        generate_sse_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET",
-            "Access-Control-Allow-Headers": "Cache-Control"
-        }
-    )
+# # СТАРАЯ ФУНКЦИЯ SSE - ЗАМЕНЕНА НА НОВУЮ В sse_service.py
+# # async def generate_sse_stream() -> AsyncGenerator[str, None]:
+# #     """
+# #     Генератор потока SSE с бизнес-данными
+# #     """
+# #     # Пример department_id для демонстрации
+# #     demo_department_id = "4cb558ca-a8bc-4b81-871e-043f65218c50"
+# #     
+# #     counter = 0
+# #     while True:
+# #         try:
+# #             counter += 1
+# #             timestamp = datetime.now().isoformat()
+#             
+#             # Генерируем разные типы событий
+#             if counter % 4 == 1:
+#                 # Событие прогноза продаж
+#                 event_data = {
+#                     "event_type": "forecast_update",
+#                     "timestamp": timestamp,
+#                     "department_id": demo_department_id,
+#                     "data": {
+#                         "date": datetime.now().strftime("%Y-%m-%d"),
+#                         "predicted_sales": 150000.0 + (counter * 1000),
+#                         "confidence": 0.85
+#                     }
+#                 }
+#             elif counter % 4 == 2:
+#                 # Событие почасовых продаж
+#                 event_data = {
+#                     "event_type": "hourly_sales_update",
+#                     "timestamp": timestamp,
+#                     "department_id": demo_department_id,
+#                     "data": {
+#                         "date": datetime.now().strftime("%Y-%m-%d"),
+#                         "hour": datetime.now().hour,
+#                         "sales_amount": 5000.0 + (counter * 100),
+#                         "transactions_count": 45 + counter
+#                     }
+#                 }
+#             elif counter % 4 == 3:
+#                 # Событие сравнения план/факт
+#                 event_data = {
+#                     "event_type": "plan_vs_fact_update",
+#                     "timestamp": timestamp,
+#                     "department_id": demo_department_id,
+#                     "data": {
+#                         "date": datetime.now().strftime("%Y-%m-%d"),
+#                         "predicted_sales": 150000.0,
+#                         "actual_sales": 145000.0 + (counter * 500),
+#                         "error_percentage": round((counter * 0.1) - 3.33, 2)
+#                     }
+#                 }
+#             else:
+#                 # Событие состояния системы
+#                 event_data = {
+#                     "event_type": "system_status",
+#                     "timestamp": timestamp,
+#                     "data": {
+#                         "active_departments": 5,
+#                         "total_daily_sales": 750000.0 + (counter * 10000),
+#                         "api_response_time_ms": 120 + (counter % 50),
+#                         "cache_hit_rate": 0.75 + (counter % 20) * 0.01
+#                     }
+#                 }
+#             
+#             # Форматируем как SSE
+#             sse_data = f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+#             
+#             logger.info(f"Отправляем SSE событие: {event_data['event_type']}")
+#             yield sse_data
+#             
+#             # Ждём 3 секунды между событиями
+#             await asyncio.sleep(3)
+#             
+#         except Exception as e:
+#             logger.error(f"Ошибка генерации SSE события: {e}")
+#             # Отправляем событие об ошибке
+#             error_event = {
+#                 "event_type": "error",
+#                 "timestamp": datetime.now().isoformat(),
+#                 "data": {
+#                     "message": str(e),
+#                     "error_type": "stream_generation_error"
+#                 }
+#             }
+# #             yield f"data: {json.dumps(error_event, ensure_ascii=False)}\n\n"
+#             await asyncio.sleep(5)
+
+
+# СТАРЫЙ SSE ENDPOINT - ЗАМЕНЕН НА НОВЫЙ В sse_endpoints.py
+# @router.get("/sse")
+# async def stream_sse():
+#     """
+#     Server-Sent Events endpoint для потокового получения бизнес-данных
+#     
+#     Этот endpoint предоставляет реальное время обновления данных:
+#     - Прогнозы продаж
+#     - Почасовые продажи
+#     - Сравнение план/факт
+#     - Статус системы
+#     
+#     Формат: text/event-stream
+#     Не требует авторизации для совместимости с Deep Research
+#     """
+#     logger.info("Запущен SSE поток для клиента")
+#     
+#     return StreamingResponse(
+#         generate_sse_stream(),
+#         media_type="text/event-stream",
+#         headers={
+#             "Cache-Control": "no-cache",
+#             "Connection": "keep-alive",
+#             "Access-Control-Allow-Origin": "*",
+#             "Access-Control-Allow-Methods": "GET",
+#             "Access-Control-Allow-Headers": "Cache-Control"
+#         }
+#     )
 
 
 @router.get("/sse-test", response_class=HTMLResponse)
